@@ -12,6 +12,7 @@ using System.Linq;
 using AForge.Video;
 using AForge.Video.DirectShow;
 using ChatApp.Shared;
+using Microsoft.Data.Sqlite;
 
 namespace ChatClient
 {
@@ -42,6 +43,7 @@ namespace ChatClient
 
         public Form1()
         {
+            InitializeClientDatabase(); // Gọi hàm tạo Database trước
             SetupUI_FinalFix(); // Khởi tạo giao diện đã fix
             InitCamera();       // Tìm Webcam
         }
@@ -49,6 +51,24 @@ namespace ChatClient
         private void InitCamera()
         {
             try { videoDevices = new FilterInfoCollection(FilterCategory.VideoInputDevice); } catch { }
+        }
+
+        private void InitializeClientDatabase()
+        {
+            string dbPath = Path.Combine(Application.StartupPath, "ClientHistory.sqlite");
+            using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                connection.Open();
+                var command = connection.CreateCommand();
+                command.CommandText = @"
+            CREATE TABLE IF NOT EXISTS HistoryLogs (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                LogType TEXT,
+                Timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                Content TEXT
+            );";
+                command.ExecuteNonQuery();
+            }
         }
 
         // --- 5. THIẾT KẾ GIAO DIỆN (ĐÃ FIX LỖI CHE CHỮ) ---
@@ -75,10 +95,10 @@ namespace ChatClient
             btnDisconnect = new Button { Text = "NGẮT", Location = new Point(400, Y_POS - 2), Width = 80, Height = 28, BackColor = Color.IndianRed, ForeColor = Color.White, Enabled = false };
 
             btnChatHistory = new Button { Text = "💬 L.SỬ CHAT", Location = new Point(500, Y_POS - 2), Width = 100, Height = 28, BackColor = Color.DimGray, ForeColor = Color.White };
-            btnChatHistory.Click += (s, e) => OpenLogFile("History.txt");
+            btnChatHistory.Click += (s, e) => OpenLogFile("CHAT");
 
             btnCallHistory = new Button { Text = "📞 L.SỬ GỌI", Location = new Point(610, Y_POS - 2), Width = 100, Height = 28, BackColor = Color.DimGray, ForeColor = Color.White };
-            btnCallHistory.Click += (s, e) => OpenLogFile("CallHistory.txt");
+            btnCallHistory.Click += (s, e) => OpenLogFile("CALL");
 
             lblStatus = new Label { Text = "OFFLINE", Location = new Point(720, Y_POS + 3), AutoSize = true, Font = new Font("Arial", 10, FontStyle.Bold), ForeColor = Color.Red };
 
@@ -141,24 +161,62 @@ namespace ChatClient
         }
 
         // --- 6. LOGIC LỊCH SỬ ---
-        private void LogToHistory(string filename, string msg)
+        private void LogToHistory(string logType, string msg)
         {
             try
             {
-                string path = Path.Combine(Application.StartupPath, filename);
-                string log = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n";
-                File.AppendAllText(path, log);
+                string dbPath = Path.Combine(Application.StartupPath, "ClientHistory.sqlite");
+                using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+                {
+                    connection.Open();
+                    var command = connection.CreateCommand();
+            
+                    // Đã sửa: Chỉ định rõ việc chèn thêm thời gian (Timestamp) vào câu lệnh INSERT
+                    command.CommandText = "INSERT INTO HistoryLogs (LogType, Timestamp, Content) VALUES ($type, $time, $content)";
+            
+                    command.Parameters.AddWithValue("$type", logType); 
+                    // Truyền trực tiếp giờ hiện tại của máy tính (Giờ Việt Nam)
+                    command.Parameters.AddWithValue("$time", DateTime.Now); 
+                    command.Parameters.AddWithValue("$content", msg);
+            
+                    command.ExecuteNonQuery();
+                }
             }
             catch { }
         }
 
-        private void OpenLogFile(string filename)
+        private void OpenLogFile(string logType)
         {
-            string path = Path.Combine(Application.StartupPath, filename);
-            if (File.Exists(path)) Process.Start("notepad.exe", path);
-            else MessageBox.Show($"Chưa có dữ liệu trong {filename}!");
-        }
+            try
+            {
+                string dbPath = Path.Combine(Application.StartupPath, "ClientHistory.sqlite");
+                using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+                {
+                    connection.Open();
+                    var command = connection.CreateCommand();
+                    command.CommandText = "SELECT Timestamp, Content FROM HistoryLogs WHERE LogType = $type ORDER BY Id DESC LIMIT 20";
+                    command.Parameters.AddWithValue("$type", logType);
 
+                    using (var reader = command.ExecuteReader())
+                    {
+                        string historyStr = $"--- Lịch sử {logType} ---\n\n";
+                        bool hasData = false;
+                        while (reader.Read())
+                        {
+                            hasData = true;
+                            historyStr += $"[{reader.GetDateTime(0):dd/MM/yyyy HH:mm:ss}] {reader.GetString(1)}\n";
+                        }
+                        if (!hasData) historyStr += "Chưa có dữ liệu.";
+
+                        MessageBox.Show(historyStr, $"Lịch sử {logType}", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Lỗi đọc CSDL: " + ex.Message);
+            }
+        }
         // --- 7. NHẬN DỮ LIỆU ---
         private void ReceiveLoop()
         {
@@ -176,14 +234,14 @@ namespace ChatClient
                             // Sử dụng khóa (DefaultKey hoặc sharedKey từ DH) và IV kèm theo để giải mã
                             string msg = SimpleAES.DecryptString(p.Data, SimpleAES.DefaultKey, p.IV);
                             AppendChat($"{p.Sender}: {msg}\n", string.IsNullOrEmpty(p.Recipient) ? Color.Black : Color.DeepPink);
-                            LogToHistory("History.txt", $"{p.Sender}: {msg}");
+                            LogToHistory("CHAT", $"{p.Sender}: {msg}");
                         }
                         else if (p.Type == PacketType.Video)
                         {
                             if (currentRemoteCaller != p.Sender)
                             {
                                 currentRemoteCaller = p.Sender;
-                                LogToHistory("CallHistory.txt", $"NHẬN CUỘC GỌI TỪ: {p.Sender}");
+                                LogToHistory("CALL", $"NHẬN CUỘC GỌI TỪ: {p.Sender}");
                             }
                             using (var ms = new MemoryStream(p.Data))
                             {
@@ -201,7 +259,7 @@ namespace ChatClient
                                 {
                                     File.WriteAllBytes(sfd.FileName, fileData);
                                     AppendChat($"Hệ thống: Đã nhận file [{p.FileName}]\n", Color.Green);
-                                    LogToHistory("History.txt", $"[FILE] Nhận {p.FileName} từ {p.Sender}");
+                                    LogToHistory("CHAT", $"[FILE] Nhận {p.FileName} từ {p.Sender}");
                                 }
                             }
                         }
@@ -231,7 +289,7 @@ namespace ChatClient
             btnVideo.Text = "⏹ DỪNG GỌI"; btnVideo.BackColor = Color.Crimson;
 
             string target = txtRecipient.Text.Trim();
-            LogToHistory("CallHistory.txt", $"BẮT ĐẦU GỌI TỚI: {(string.IsNullOrEmpty(target) ? "Nhóm" : target)}");
+            LogToHistory("CALL", $"BẮT ĐẦU GỌI TỚI: {(string.IsNullOrEmpty(target) ? "Nhóm" : target)}");
 
             videoSource = new VideoCaptureDevice(videoDevices[0].MonikerString);
             videoSource.NewFrame += Camera_NewFrame;
@@ -240,9 +298,13 @@ namespace ChatClient
 
         private void StopCamera()
         {
+            //Kiểm tra nếu không có cuộc gọi thì không làm gì cả
+            if (!isCalling) return;
+
             isCalling = false;
             btnVideo.Text = "📹 BẮT ĐẦU GỌI"; btnVideo.BackColor = Color.SeaGreen;
-            LogToHistory("CallHistory.txt", "KẾT THÚC CUỘC GỌI.");
+            // Ghi log (Bây giờ nó chỉ ghi đúng 1 lần khi thực sự đang gọi và ấn tắt)
+            LogToHistory("CALL", "KẾT THÚC CUỘC GỌI.");
 
             if (videoSource != null && videoSource.IsRunning) { videoSource.SignalToStop(); videoSource = null; }
             if (picLocal.Image != null) picLocal.Image = null;
@@ -297,7 +359,7 @@ namespace ChatClient
             // Đóng gói dữ liệu đã mã hóa và Vector khởi tạo (IV) vào DTO
             SendPacket(new DataPacket { Type = PacketType.Message, Sender = myName, Recipient = target, Data = encrypted, IV = iv });
             AppendChat($"Tôi: {txtMsg.Text}\n", Color.Blue);
-            LogToHistory("History.txt", $"Tôi (tới {target}): {txtMsg.Text}");
+            LogToHistory("CHAT", $"Tôi (tới {target}): {txtMsg.Text}");
             txtMsg.Clear();
         }
 
@@ -312,7 +374,7 @@ namespace ChatClient
                 string target = txtRecipient.Text.Trim();
                 SendPacket(new DataPacket { Type = PacketType.File, Sender = myName, Recipient = target, FileName = Path.GetFileName(ofd.FileName), Data = encryptedFile, IV = iv });
                 AppendChat($"Tôi: Đã gửi file tới {(string.IsNullOrEmpty(target) ? "Tất cả" : target)}\n", Color.Blue);
-                LogToHistory("History.txt", $"Tôi: Gửi file {ofd.FileName} tới {target}");
+                LogToHistory("CHAT", $"Tôi: Gửi file {ofd.FileName} tới {target}");
             }
         }
 
